@@ -347,8 +347,11 @@ static char *invalid_hll_err = "-INVALIDOBJ Corrupted HLL object detected\r\n";
 /* Set the value of the register at position 'regnum' to 'val'.
  * 'p' is an array of unsigned bytes. */
 #define HLL_DENSE_SET_REGISTER(p,regnum,val) do { \
+    /* p是桶数组的指针, regnum是桶index，val是要设置的值 */
     uint8_t *_p = (uint8_t*) p; \
+    /* _byte 字节的偏移量 = 桶index * 每个桶的bit数 / 8 */
     unsigned long _byte = regnum*HLL_BITS/8; \
+    /*  */
     unsigned long _fb = regnum*HLL_BITS&7; \
     unsigned long _fb8 = 8 - _fb; \
     unsigned long _v = val; \
@@ -505,6 +508,7 @@ int hllDenseSet(uint8_t *registers, long index, uint8_t count) {
  * element in order to retrieve the index and zero-run count. */
 int hllDenseAdd(uint8_t *registers, unsigned char *ele, size_t elesize) {
     long index;
+    /* index就是桶的下标， count则是后面50个bit位中1第一次出现的位置 */
     uint8_t count = hllPatLen(ele,elesize,&index);
     /* Update the register if this element produced a longer run of zeroes. */
     return hllDenseSet(registers,index,count);
