@@ -1586,6 +1586,13 @@ int slaveTryPartialResynchronization(int fd, int read_reply) {
 
 /* This handler fires when the non blocking connect was able to
  * establish a connection with the master. */
+/**
+ * 当非阻塞的connect 连接到了master之后会有事件会调用
+ * @param el
+ * @param fd
+ * @param privdata
+ * @param mask
+ */
 void syncWithMaster(aeEventLoop *el, int fd, void *privdata, int mask) {
     char tmpfile[256], *err = NULL;
     int dfd = -1, maxtries = 5;
@@ -1613,21 +1620,41 @@ void syncWithMaster(aeEventLoop *el, int fd, void *privdata, int mask) {
     }
 
     /* Send a PING to check the master is able to reply without errors. */
+    /**
+     * 如果复制的状态为REPL_STATE_CONNECTING，发送一个PING去检查主节点是否能正确回复一个PONG
+     */
     if (server.repl_state == REPL_STATE_CONNECTING) {
         serverLog(LL_NOTICE,"Non blocking connect for SYNC fired the event.");
         /* Delete the writable event so that the readable event remains
          * registered and we can wait for the PONG reply. */
+        /**
+         * 暂时取消接听fd的写事件，以便等待PONG回复时，注册可读事件
+         * 先取消监听fd的写事件，因为接下来要读主节点服务器发送过来的PONG回复，因此只监听可读事件的发生。
+         */
         aeDeleteFileEvent(server.el,fd,AE_WRITABLE);
+        /**
+         * 设置复制状态为等待PONG回复
+         */
         server.repl_state = REPL_STATE_RECEIVE_PONG;
         /* Send the PING, don't check for errors at all, we have the timeout
          * that will take care about this. */
+        /**
+         * 发送一个PING命令
+         * 写的方式调用sendSynchronousCommand()函数发送一个PING命令给主节点。
+         */
         err = sendSynchronousCommand(SYNC_CMD_WRITE,fd,"PING",NULL);
         if (err) goto write_error;
         return;
     }
 
     /* Receive the PONG command. */
+    /**
+     * 接收到服务端返回的 PONG 命令
+     */
     if (server.repl_state == REPL_STATE_RECEIVE_PONG) {
+        /**
+         * 从主节点读一个PONG命令sendSynchronousCommand
+         */
         err = sendSynchronousCommand(SYNC_CMD_READ,fd,NULL);
 
         /* We accept only two replies as valid, a positive +PONG reply
@@ -1635,6 +1662,10 @@ void syncWithMaster(aeEventLoop *el, int fd, void *privdata, int mask) {
          * Note that older versions of Redis replied with "operation not
          * permitted" instead of using a proper error code, so we test
          * both. */
+        /**
+         * // 只接受两种有效的回复。一种是 "+PONG"，一种是认证错误"-NOAUTH"。
+    // 旧版本的返回有"-ERR operation not permitted"
+         */
         if (err[0] != '+' &&
             strncmp(err,"-NOAUTH",7) != 0 &&
             strncmp(err,"-ERR operation not permitted",28) != 0)
@@ -1647,48 +1678,76 @@ void syncWithMaster(aeEventLoop *el, int fd, void *privdata, int mask) {
                 "Master replied to PING, replication can continue...");
         }
         sdsfree(err);
+        /**
+         *         已经收到PONG，更改状态设置为发送认证命令AUTH给主节点
+         */
         server.repl_state = REPL_STATE_SEND_AUTH;
     }
 
     /* AUTH with the master if required. */
     if (server.repl_state == REPL_STATE_SEND_AUTH) {
+        // 如果服务器设置了认证密码
         if (server.masterauth) {
+            // 写AUTH给主节点
             err = sendSynchronousCommand(SYNC_CMD_WRITE,fd,"AUTH",server.masterauth,NULL);
             if (err) goto write_error;
+            // 设置状态为等待接受认证回复
             server.repl_state = REPL_STATE_RECEIVE_AUTH;
             return;
         } else {
+            // 如果没有设置认证密码，直接设置复制状态为发送端口号给主节点
             server.repl_state = REPL_STATE_SEND_PORT;
         }
     }
 
     /* Receive AUTH reply. */
+    /**
+     * 接收到AUTH认证
+     */
     if (server.repl_state == REPL_STATE_RECEIVE_AUTH) {
+        // 从主节点读回复
         err = sendSynchronousCommand(SYNC_CMD_READ,fd,NULL);
+        // 回复错误，认证失败
         if (err[0] == '-') {
             serverLog(LL_WARNING,"Unable to AUTH to MASTER: %s",err);
             sdsfree(err);
             goto error;
         }
         sdsfree(err);
+        // 设置复制状态为发送端口号给主节点
         server.repl_state = REPL_STATE_SEND_PORT;
     }
 
     /* Set the slave port, so that Master's INFO command can list the
      * slave listening port correctly. */
+    /**
+     * 如果复制状态是，发送从节点端口号给主节点，主节点的INFO命令就能够列出从节点正在监听的端口号
+     */
     if (server.repl_state == REPL_STATE_SEND_PORT) {
+        // 获取端口号
         sds port = sdsfromlonglong(server.slave_announce_port ?
             server.slave_announce_port : server.port);
+        // 将端口号写给主节点
         err = sendSynchronousCommand(SYNC_CMD_WRITE,fd,"REPLCONF",
                 "listening-port",port, NULL);
         sdsfree(port);
         if (err) goto write_error;
         sdsfree(err);
+        // 置复制状态为接受端口号
         server.repl_state = REPL_STATE_RECEIVE_PORT;
         return;
     }
 
+
+    /**
+     * 主节点从fd中读到REPLCONF listening-port <port>命令，调用replconfCommand()命令来处理，而replconfCommand()函数的定义就在replication.c文件中，
+     * REPLCONF命令可以设置多种不同的选项，解析到端口号后，将端口号保存从节点对应client状态的c->slave_listening_port = port中。最终回复一个"+OK\r\n"状态的回复，写在fd中。
+     */
+
     /* Receive REPLCONF listening-port reply. */
+    /**
+     * 复制状态为接受端口号
+     */
     if (server.repl_state == REPL_STATE_RECEIVE_PORT) {
         err = sendSynchronousCommand(SYNC_CMD_READ,fd,NULL);
         /* Ignore the error if any, not all the Redis versions support
@@ -1711,13 +1770,25 @@ void syncWithMaster(aeEventLoop *el, int fd, void *privdata, int mask) {
     /* Set the slave ip, so that Master's INFO command can list the
      * slave IP address port correctly in case of port forwarding or NAT. */
     if (server.repl_state == REPL_STATE_SEND_IP) {
+        /**
+         * 将IP写给主节点
+         */
         err = sendSynchronousCommand(SYNC_CMD_WRITE,fd,"REPLCONF",
                 "ip-address",server.slave_announce_ip, NULL);
         if (err) goto write_error;
         sdsfree(err);
+        /**
+         * 设置复制状态为接受IP
+         */
         server.repl_state = REPL_STATE_RECEIVE_IP;
         return;
     }
+
+    /**
+     * 主节点仍然会调用replication.c文件中实现的replconfCommand()函数来处理REPLCONF命令，解析出REPLCONF ip-address ip命令，
+     * 保存从节点的ip到主节点的对应从节点的client的c->slave_ip中。然后回复"+OK\r\n"状态，写到fd中。
+     */
+
 
     /* Receive REPLCONF ip-address reply. */
     if (server.repl_state == REPL_STATE_RECEIVE_IP) {
@@ -1739,15 +1810,24 @@ void syncWithMaster(aeEventLoop *el, int fd, void *privdata, int mask) {
      *
      * The master will ignore capabilities it does not understand. */
     if (server.repl_state == REPL_STATE_SEND_CAPA) {
+        /**
+         * 复制状态为发送capa，通知主节点从节点的能力
+         */
         err = sendSynchronousCommand(SYNC_CMD_WRITE,fd,"REPLCONF",
                 "capa","eof","capa","psync2",NULL);
         if (err) goto write_error;
         sdsfree(err);
+        /**
+         * 设置复制状态为接受从节点的capa
+         */
         server.repl_state = REPL_STATE_RECEIVE_CAPA;
         return;
     }
 
     /* Receive CAPA reply. */
+    /**
+     * 从主节点读取capa回复
+     */
     if (server.repl_state == REPL_STATE_RECEIVE_CAPA) {
         err = sendSynchronousCommand(SYNC_CMD_READ,fd,NULL);
         /* Ignore the error if any, not all the Redis versions support
@@ -1757,6 +1837,9 @@ void syncWithMaster(aeEventLoop *el, int fd, void *privdata, int mask) {
                                   "REPLCONF capa: %s", err);
         }
         sdsfree(err);
+        /**
+         * 设置复制状态为发送PSYNC命令
+         */
         server.repl_state = REPL_STATE_SEND_PSYNC;
     }
 
@@ -1781,8 +1864,21 @@ void syncWithMaster(aeEventLoop *el, int fd, void *privdata, int mask) {
                              server.repl_state);
         goto error;
     }
+    /**
+     * 复制状态为发送PSYNC命令。尝试进行部分重同步。
+     */
 
+    /**
+     * // 如果没有缓冲主节点的结构，slaveTryPartialResynchronization()函数将会至少尝试使用PSYNC去进行一个全同步，
+     * 这样就能得到主节点的运行runid和全局复制偏移量。并且在下次重连接时可以尝试进行部分重同步。
+     */
+
+    // 向主节点发送一个部分重同步命令PSYNC，参数0表示不读主节点的回复，只获取主节点的运行runid和全局复制偏移量
     psync_result = slaveTryPartialResynchronization(fd,1);
+
+    /**
+     * 发送PSYNC出错
+     */
     if (psync_result == PSYNC_WAIT_REPLY) return; /* Try again later... */
 
     /* If the master is in an transient error, we should try to PSYNC
@@ -1864,9 +1960,11 @@ write_error: /* Handle sendSynchronousCommand(SYNC_CMD_WRITE) errors. */
     goto error;
 }
 
+// 以非阻塞的方式连接主节点
 int connectWithMaster(void) {
     int fd;
 
+    // 连接主节点
     fd = anetTcpNonBlockBestEffortBindConnect(NULL,
         server.masterhost,server.masterport,NET_FIRST_BIND_ADDR);
     if (fd == -1) {
@@ -1874,7 +1972,13 @@ int connectWithMaster(void) {
             strerror(errno));
         return C_ERR;
     }
-
+    /**
+     * 监听主节点fd的可读和可写事件的发生，并设置其处理程序为syncWithMaster。
+     */
+     /**
+      * 主从建立网络时，同时注册fd的AE_READABLE|AE_WRITABLE事件，
+      * 因此会触发一个AE_WRITABLE事件，调用syncWithMaster()函数，处理写事件。
+      */
     if (aeCreateFileEvent(server.el,fd,AE_READABLE|AE_WRITABLE,syncWithMaster,NULL) ==
             AE_ERR)
     {
@@ -1882,11 +1986,16 @@ int connectWithMaster(void) {
         serverLog(LL_WARNING,"Can't create readable event for SYNC");
         return C_ERR;
     }
-
+    // 最近一次读到RDB文件内容的时间
     server.repl_transfer_lastio = server.unixtime;
+    // 从节点和主节点的同步套接字
     server.repl_transfer_s = fd;
+    // 处于和主节点正在连接的状态 ！！！ 改变了REPL_STATE_CONNECTING
     server.repl_state = REPL_STATE_CONNECTING;
     return C_OK;
+    /**
+     * 主从网络建立就完成了。
+     */
 }
 
 /* This function can be called when a non blocking connection is currently
@@ -1936,24 +2045,36 @@ int cancelReplicationHandshake(void) {
 }
 
 /* Set replication to the specified master address and port. */
+/**
+ * 设置复制操作的主节点IP和端口
+ * @param ip
+ * @param port
+ */
 void replicationSetMaster(char *ip, int port) {
     int was_master = server.masterhost == NULL;
-
+    // 按需清除原来的主节点信息
     sdsfree(server.masterhost);
+    // 设置ip和端口
     server.masterhost = sdsnew(ip);
     server.masterport = port;
+    // 如果有其他的主节点，在释放
+    // 例如服务器1是服务器2的主节点，现在服务器2要同步服务器3，服务器3要成为服务器2的主节点，因此要释放服务器1
     if (server.master) {
         freeClient(server.master);
     }
+    // 解除所有客户端的阻塞状态
     disconnectAllBlockedClients(); /* Clients blocked in master, now slave. */
 
     /* Force our slaves to resync with us as well. They may hopefully be able
      * to partially resync with us, but we can notify the replid change. */
+    // 关闭所有从节点服务器的连接，强制从节点服务器进行重新同步操作
     disconnectSlaves();
+    // 取消执行复制操作
     cancelReplicationHandshake();
     /* Before destroying our master state, create a cached master using
      * our own parameters, to later PSYNC with the new master. */
     if (was_master) replicationCacheMasterUsingMyself();
+    // 设置复制必须重新连接主节点的状态
     server.repl_state = REPL_STATE_CONNECT;
 }
 
@@ -2000,21 +2121,32 @@ void replicationHandleMasterDisconnection(void) {
      * maybe we'll be able to PSYNC with our master later. We'll disconnect
      * the slaves only if we'll have to do a full resync with our master. */
 }
-
+// SLAVEOF host port命令实现
 void slaveofCommand(client *c) {
     /* SLAVEOF is not allowed in cluster mode as replication is automatically
      * configured using the current address of the master node. */
+    /**
+     * 如果当前处于集群模式，不能进行复制操作
+     */
     if (server.cluster_enabled) {
         addReplyError(c,"SLAVEOF not allowed in cluster mode.");
         return;
     }
 
+    /**
+     * SLAVEOF NO ONE命令使得这个从节点关闭复制功能，并从从节点转变回主节点，原来同步所得的数据集不会被丢弃。
+     */
     /* The special host/port combination "NO" "ONE" turns the instance
      * into a master. Otherwise the new master address is set. */
     if (!strcasecmp(c->argv[1]->ptr,"no") &&
         !strcasecmp(c->argv[2]->ptr,"one")) {
+        /**
+         * 如果保存了主节点IP
+         */
         if (server.masterhost) {
+            // 取消复制操作，设置服务器为主服务器
             replicationUnsetMaster();
+            // 获取client的每种信息，并以sds形式返回，并打印到日志中
             sds client = catClientInfoString(sdsempty(),c);
             serverLog(LL_NOTICE,"MASTER MODE enabled (user request from '%s')",
                 client);
@@ -2031,20 +2163,32 @@ void slaveofCommand(client *c) {
             addReplyError(c, "Command is not valid when client is a replica.");
             return;
         }
-
+        /**
+         * 获取端口号
+         */
         if ((getLongFromObjectOrReply(c, c->argv[2], &port, NULL) != C_OK))
             return;
 
         /* Check if we are already attached to the specified slave */
+        /**
+         * 如果已存在从属于masterhost主节点且命令参数指定的主节点和masterhost相等，端口也相等，直接返回
+         */
         if (server.masterhost && !strcasecmp(server.masterhost,c->argv[1]->ptr)
             && server.masterport == port) {
             serverLog(LL_NOTICE,"SLAVE OF would result into synchronization with the master we are already connected with. No operation performed.");
             addReplySds(c,sdsnew("+OK Already connected to specified master\r\n"));
             return;
         }
+        /**
+         * 第一次执行设置端口和ip，或者重新设置
+         * 设置服务器的主节点和端口
+         */
         /* There was no previous master or the user specified a different one,
          * we can continue. */
         replicationSetMaster(c->argv[1]->ptr, port);
+        /**
+         * 获取client的每种信息，并以sds形式返回，并打印到日志中
+         */
         sds client = catClientInfoString(sdsempty(),c);
         serverLog(LL_NOTICE,"SLAVE OF %s:%d enabled (user request from '%s')",
             server.masterhost, server.masterport, client);
@@ -2522,6 +2666,10 @@ void replicationCron(void) {
     static long long replication_cron_loops = 0;
 
     /* Non blocking connection timeout? */
+    /**
+     * 如果处于要必须连接主节点的状态，尝试连接
+     * 有masterhost并且状态为REPL_STATE_CONNECTING
+     */
     if (server.masterhost &&
         (server.repl_state == REPL_STATE_CONNECTING ||
          slaveIsInHandshakeState()) &&
@@ -2548,9 +2696,13 @@ void replicationCron(void) {
     }
 
     /* Check if we should connect to a MASTER */
+    /**
+     * slaveof执行结束之后，如果处于要必须连接主节点的状态，尝试连接
+     */
     if (server.repl_state == REPL_STATE_CONNECT) {
         serverLog(LL_NOTICE,"Connecting to MASTER %s:%d",
             server.masterhost, server.masterport);
+        // 以非阻塞的方式连接主节点
         if (connectWithMaster() == C_OK) {
             serverLog(LL_NOTICE,"MASTER <-> SLAVE sync started");
         }
