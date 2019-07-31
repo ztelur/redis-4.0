@@ -892,7 +892,7 @@ int rdbSaveRio(rio *rdb, int *error, int flags, rdbSaveInfo *rsi) {
     snprintf(magic,sizeof(magic),"REDIS%04d",RDB_VERSION);
     if (rdbWriteRaw(rdb,magic,9) == -1) goto werr;
     if (rdbSaveInfoAuxFields(rdb,flags,rsi) == -1) goto werr;
-
+//    开始便利数据库，一个一个开始持久化
     for (j = 0; j < server.dbnum; j++) {
         redisDb *db = server.db+j;
         dict *d = db->dict;
@@ -920,6 +920,7 @@ int rdbSaveRio(rio *rdb, int *error, int flags, rdbSaveInfo *rsi) {
         if (rdbSaveLen(rdb,expires_size) == -1) goto werr;
 
         /* Iterate this DB writing every entry */
+//        便利数据库中的每一个entry
         while((de = dictNext(di)) != NULL) {
             sds keystr = dictGetKey(de);
             robj key, *o = dictGetVal(de);
@@ -1008,6 +1009,7 @@ int rdbSave(char *filename, rdbSaveInfo *rsi) {
     int error = 0;
 
     snprintf(tmpfile,256,"temp-%d.rdb", (int) getpid());
+//    创建一个文件描述符
     fp = fopen(tmpfile,"w");
     if (!fp) {
         char *cwdp = getcwd(cwd,MAXPATHLEN);
@@ -1019,8 +1021,9 @@ int rdbSave(char *filename, rdbSaveInfo *rsi) {
             strerror(errno));
         return C_ERR;
     }
-
+// 初始化为一个rio rdb 对象
     rioInitWithFile(&rdb,fp);
+//    rdbSaveRio是真正在写文件
     if (rdbSaveRio(&rdb,&error,RDB_SAVE_NONE,rsi) == C_ERR) {
         errno = error;
         goto werr;
